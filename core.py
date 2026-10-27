@@ -19,6 +19,9 @@ FROM_FONT = "Khmer OS Moul Light"
 TO_FONT = "Times New Roman"
 NOWIN = 0x08000000 if os.name == "nt" else 0  # no console flash from the windowed exe
 
+ENGINE_NAMES = {"excel": "Microsoft Excel", "libreoffice": "LibreOffice",
+                "direct": "Direct (no Excel needed)"}
+
 KHMER_PREFERENCE = [
     "Khmer OS Battambang", "Khmer OS System", "Khmer OS Content", "Khmer OS Siemreap",
     "Khmer UI", "Leelawadee UI", "Noto Sans Khmer", "Noto Serif Khmer", "Khmer OS Muol Light",
@@ -114,11 +117,12 @@ def free_ram_gb():
     return None
 
 
-def auto_workers(jobs) -> int:
-    n = min(3, os.cpu_count() or 1, len(jobs))
+def auto_workers(jobs, engine=None) -> int:
+    direct = engine == "direct"  # no Excel process, so more files can run at once
+    n = min(4 if direct else 3, os.cpu_count() or 1, len(jobs))
     ram = free_ram_gb()
     if ram is not None:
-        n = min(n, max(1, int(ram // 1.5)))
+        n = min(n, max(1, int(ram // (0.6 if direct else 1.5))))
     try:
         if max(Path(s).stat().st_size for s, _ in jobs) > 30 * 1024 * 1024:
             n = min(n, 2)
@@ -152,14 +156,32 @@ def find_soffice():
     return None
 
 
+def has_direct() -> bool:
+    try:
+        import openpyxl  # noqa: F401
+        import reportlab  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 def resolve_engine(choice="auto") -> str:
     if choice != "auto":
         return choice
     return "excel" if has_excel() else "libreoffice"
 
 
+def fallback_engine():
+    """Real office engine used for files the direct engine cannot draw (Khmer text)."""
+    if has_excel():
+        return "excel"
+    return "libreoffice" if find_soffice() else None
+
+
 def engine_problem(engine: str):
     """None if the engine can run, otherwise a plain-language message."""
+    if engine == "direct" and not has_direct():
+        return "The direct engine needs the Python packages openpyxl and reportlab (pip install openpyxl reportlab)."
     if engine == "excel" and not has_excel():
         return "Microsoft Excel was not found on this PC (or pywin32 is missing)."
     if engine == "libreoffice" and not find_soffice():
@@ -186,6 +208,8 @@ def friendly_error(raw: str) -> str:
         (("permission denied", "access is denied"),
          "Cannot save the PDF. Close it if it is open, or choose another folder."),
         (("call was rejected", "rpc server"), "Excel was busy. It will work if you try again."),
+        (("no module named 'openpyxl", "no module named 'reportlab"),
+         "The direct engine is missing openpyxl or reportlab."),
     ]
     for keys, text in rules:
         if any(k in r for k in keys):
@@ -436,8 +460,21 @@ def convert_one(src: Path, out_pdf: Path, cfg: dict) -> str:
         return f"{src.name}: skipped (PDF already up to date)"
 
     fit = cfg.get("fit", "auto")  # auto | all | off
+    fb_note = ""
+    if cfg["engine"] == "direct":  # read the .xlsx data and draw the PDF: Excel is never started
+        import direct_pdf
+        try:
+            note = direct_pdf.convert(src, out_pdf, cfg)
+            return f"{src.name} -> {out_pdf.name}  (direct, no Excel{', ' + note if note else ''})  {time.time() - t0:.1f}s"
+        except direct_pdf.NeedsShaping:
+            fb = fallback_engine()
+            if fb is None:  # nothing better installed: draw it anyway, Khmer may look wrong
+                note = direct_pdf.convert(src, out_pdf, cfg, allow_khmer=True)
+                return f"{src.name} -> {out_pdf.name}  (direct, {note})  {time.time() - t0:.1f}s"
+            cfg = dict(cfg, engine=fb)
+            fb_note = f"Khmer text: used {ENGINE_NAMES[fb]}"
     with tempfile.TemporaryDirectory() as td:
-        work, parts = src, []
+        work, parts = src, ([fb_note] if fb_note else [])
         if xlsx_fonts.needs_font_change(src, cfg["from_font"]):
             tmp = Path(td) / "fonts" / src.name
             tmp.parent.mkdir()

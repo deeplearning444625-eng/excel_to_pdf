@@ -116,6 +116,11 @@ progress{width:100%;height:10px;accent-color:var(--accent)}
         <label class="row"><input type="radio" name="outmode" value="same"> Save PDF next to the Excel file
           <span class="note" style="margin:0">(only for files added by path; uploaded files always use the folder above)</span></label>
         <span>Khmer font in PDF:</span><select id="khmer"></select>
+        <span>Engine:</span>
+        <select id="engine">
+          <option value="auto">Excel / LibreOffice (exact layout)</option>
+          <option value="direct">Direct: no Excel needed (fastest, simpler layout)</option>
+        </select>
         <span>Speed:</span>
         <select id="speed">
           <option>Auto (recommended)</option>
@@ -280,7 +285,9 @@ function renderControls(){
   else if(r.finished) text = r.cancelled ? "Cancelled." :
       "Finished: " + r.ok + " done, " + r.fail + " failed, in " + Math.round(r.elapsed) + " s.";
   $("#summary").textContent = text;
-  $("#fitNote").textContent = (S.engine_name === "LibreOffice" && S.settings.fit === "auto")
+  $("#fitNote").textContent = S.settings.engine === "direct"
+    ? "Direct engine: Excel is not opened. Charts and shapes are not drawn. Files with Khmer text still use Excel/LibreOffice so the letters stay correct."
+    : (S.engine_name === "LibreOffice" && S.settings.fit === "auto")
     ? "LibreOffice cannot count pages, so Auto keeps the original page setup. Choose Fit every sheet to 1 page to force it." : "";
   $("#engineLine").textContent = "Engine: " + S.engine_name + " \u00b7 PDFs are saved to: " + S.settings.out_dir;
 }
@@ -298,6 +305,7 @@ function loadSettingsOnce(){
   $("#speed").value = s.speed;
   $("#skip").checked = s.skip;
   $("#fit").value = s.fit;
+  $("#engine").value = s.engine;
 }
 
 function renderAll(){
@@ -416,12 +424,12 @@ async function saveSettings(){
   const mode = document.querySelector("input[name=outmode]:checked");
   const j = await api("/api/settings", {out_mode:mode ? mode.value : "folder", out_dir:$("#outDir").value,
                                         khmer:$("#khmer").value, speed:$("#speed").value, skip:$("#skip").checked,
-                                        fit:$("#fit").value});
+                                        fit:$("#fit").value, engine:$("#engine").value});
   if(j.error) addLocal("error", j.error);
   await refresh();
 }
 document.querySelectorAll("input[name=outmode]").forEach(r => r.onchange = saveSettings);
-for(const id of ["#outDir", "#khmer", "#speed", "#skip", "#fit"]) $(id).onchange = saveSettings;
+for(const id of ["#outDir", "#khmer", "#speed", "#skip", "#fit", "#engine"]) $(id).onchange = saveSettings;
 
 $("#btnGo").onclick = async () => {
   await saveSettings();

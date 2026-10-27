@@ -36,6 +36,14 @@ Options -> **Page fit** (command line: `--fit`):
   Very long sheets become small, so use it only when you want that.
 - **Keep the Excel page setup**: no change.
 
+## Direct engine (no Excel)
+Options -> **Engine** -> *Direct* (command line: `--engine direct`). The app reads the .xlsx data and draws
+the PDF itself, so Excel is never started: no hidden Excel window, much faster, several files at once.
+Limits: charts, shapes, rotated text and headers/footers are not drawn, and the layout is close to Excel but
+not identical. Formulas show the values saved in the file. Files with **Khmer letters automatically use
+Excel/LibreOffice** instead (the direct engine cannot shape Khmer correctly).
+Needs `openpyxl` and `reportlab` (`pip install -r requirements.txt`).
+
 ## Command line
     excel2pdf.exe report.xlsx --cli
     excel2pdf.exe D:\excel_folder -o D:\pdf --jobs 3 --khmer-font "Khmer OS System"
@@ -58,7 +66,7 @@ Options -> **Page fit** (command line: `--fit`):
     python excel_to_pdf.py            # run from source: starts the server and opens the browser
 
 Files: `excel_to_pdf.py` (entry point), `web.py` (server + API), `web_ui.py` (the page),
-`core.py` (engines, workers), `xlsx_fonts.py` (font replacement). `gui.py` (old tkinter window) is no longer used.
+`core.py` (engines, workers), `direct_pdf.py` (direct engine), `xlsx_fonts.py` (font replacement). `gui.py` (old tkinter window) is no longer used.
 
 ## Release
     git tag v1.3.0
