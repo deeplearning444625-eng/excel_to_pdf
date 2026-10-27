@@ -25,7 +25,7 @@ CELL_RE = re.compile(r"<c\b([^>]*?)(?:/>|>(.*?)</c>)", re.S)
 RUN_RE = re.compile(r"<r>\s*(<rPr>.*?</rPr>)?\s*<t\b[^>]*>(.*?)</t>\s*</r>", re.S)
 T_RE = re.compile(r"<t\b[^>]*>(.*?)</t>", re.S)
 RFONT_RE = re.compile(r'<rFont\s+val="([^"]*)"')
-KHMER_ROW_FACTOR = 1.9   # Khmer fonts are tall: row height = font size x this, so tops are not cut
+KHMER_ROW_FACTOR = 2.2   # Khmer fonts are tall: row height = font size x this, so tops are not cut
 ROW_RE = re.compile(r"<row\b([^>]*?)(/?)>")
 ROWNUM_RE = re.compile(r'\sr="[A-Z]+(\d+)"')
 S_ATTR = re.compile(r'\ss="(\d+)"')
