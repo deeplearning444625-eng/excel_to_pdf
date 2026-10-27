@@ -92,10 +92,9 @@ class AppState:
             "speed": s.get("speed") if s.get("speed") in SPEEDS else SPEEDS[0],
             "skip": bool(s.get("skip", False)),
             "fit": s.get("fit") if s.get("fit") in FIT_CHOICES else "auto",
-            "engine": s.get("engine") if s.get("engine") in ("auto", "direct") else "auto",
         }
         self.khmer_fonts = core.khmer_fonts_installed()
-        self.engine = core.resolve_engine(self.settings["engine"])
+        self.engine = core.resolve_engine("auto")
         self.engine_problem = core.engine_problem(self.engine)
 
     # ------------------------------------------------------------ notices
@@ -216,10 +215,6 @@ class AppState:
                 s["skip"] = bool(d["skip"])
             if d.get("fit") in FIT_CHOICES:
                 s["fit"] = d["fit"]
-            if d.get("engine") in ("auto", "direct") and not self.run["running"]:
-                s["engine"] = d["engine"]
-                self.engine = core.resolve_engine(s["engine"])
-                self.engine_problem = core.engine_problem(self.engine)
             snapshot = dict(s)
         core.save_settings(snapshot)
         return {"ok": True}
@@ -272,7 +267,7 @@ class AppState:
 
         sp = st["speed"]
         workers = 1 if sp.startswith("Safer") else min(3, len(jobs)) if sp.startswith("Faster") \
-            else core.auto_workers(jobs, self.engine)
+            else core.auto_workers(jobs)
         cfg = {"from_font": core.FROM_FONT, "to_font": core.TO_FONT, "engine": self.engine,
                "khmer": core.pick_khmer_font(st["khmer"]), "skip_existing": st["skip"],
                "fit": st["fit"]}
@@ -377,7 +372,7 @@ class AppState:
                               "pdf": bool(i["out"]) and i["status"] in ("done", "skipped")})
             return {"version": core.VERSION, "items": items, "run": dict(self.run),
                     "settings": dict(self.settings), "khmer_fonts": self.khmer_fonts,
-                    "engine_name": core.ENGINE_NAMES.get(self.engine, self.engine),
+                    "engine_name": "Microsoft Excel" if self.engine == "excel" else "LibreOffice",
                     "engine_problem": self.engine_problem,
                     "notices": list(self.notices)}
 

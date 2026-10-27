@@ -37,7 +37,7 @@ def run_cli(argv):
     ap.add_argument("-o", "--output", help="output PDF file (single input) or folder")
     ap.add_argument("--from-font", default=core.FROM_FONT)
     ap.add_argument("--to-font", default=core.TO_FONT)
-    ap.add_argument("--engine", choices=["auto", "excel", "libreoffice", "direct"], default="auto")
+    ap.add_argument("--engine", choices=["auto", "excel", "libreoffice"], default="auto")
     ap.add_argument("--khmer-font", help="font for Khmer letters (auto-detected if omitted)")
     ap.add_argument("-j", "--jobs", type=int, default=0, help="files converted at once (default: automatic)")
     ap.add_argument("--timeout", type=int, default=240, help="seconds before a stuck file is stopped")
@@ -65,7 +65,7 @@ def run_cli(argv):
     cfg = {"from_font": a.from_font, "to_font": a.to_font, "engine": engine,
            "khmer": core.pick_khmer_font(a.khmer_font), "skip_existing": a.skip_existing,
            "fit": a.fit}
-    workers = max(1, min(a.jobs or core.auto_workers(jobs, engine), len(jobs)))
+    workers = max(1, min(a.jobs or core.auto_workers(jobs), len(jobs)))
     print(f"excel2pdf {core.VERSION} | engine: {engine} | workers: {workers} | files: {len(jobs)} | "
           f"'{a.from_font}' -> '{a.to_font}' | Khmer font: '{cfg['khmer']}'")
     return 1 if core.run_blocking(jobs, cfg, workers, a.timeout) else 0
