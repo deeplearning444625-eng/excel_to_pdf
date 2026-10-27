@@ -330,7 +330,8 @@ def _libreoffice(xlsx: Path, out_pdf: Path) -> None:
         _lo_profile = tempfile.mkdtemp(prefix="lo_profile_")
     with tempfile.TemporaryDirectory() as td:
         cmd = [soffice, f"-env:UserInstallation={Path(_lo_profile).as_uri()}",
-               "--headless", "--convert-to", "pdf", "--outdir", td, str(xlsx)]
+               "--headless", "--norestore", "--nolockcheck", "--nologo",
+               "--convert-to", "pdf", "--outdir", td, str(xlsx)]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, creationflags=NOWIN)
         produced = Path(td) / (xlsx.stem + ".pdf")
         if r.returncode != 0 or not produced.exists():
