@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 
 import xlsx_fonts
@@ -222,13 +223,62 @@ class ExcelEngine:
         except Exception:
             pass
 
-    def convert(self, xlsx: Path, out_pdf: Path) -> None:
+    def page_counts(self, path: Path) -> list:
+        """Printed pages per worksheet (None when Excel cannot tell, e.g. no printer)."""
+        wb = self.app.Workbooks.Open(str(Path(path).resolve()), 0, True)
+        try:
+            out = []
+            for i in range(1, wb.Worksheets.Count + 1):
+                try:
+                    out.append(int(wb.Worksheets(i).PageSetup.Pages.Count))
+                except Exception:
+                    out.append(None)
+            return out
+        finally:
+            wb.Close(False)
+
+    def _fit_sheets(self, wb, counts) -> int:
+        done = 0
+        try:
+            self.app.PrintCommunication = False  # much faster when setting several properties
+        except Exception:
+            pass
+        try:
+            for i in range(1, wb.Worksheets.Count + 1):
+                if i > len(counts) or counts[i - 1] != 1:
+                    continue
+                ps = wb.Worksheets(i).PageSetup
+                ps.Zoom = False
+                ps.FitToPagesWide = 1
+                ps.FitToPagesTall = 1
+                done += 1
+        finally:
+            try:
+                self.app.PrintCommunication = True
+            except Exception:
+                pass
+        return done
+
+    def convert(self, xlsx: Path, out_pdf: Path, fit: str = "off", orig=None) -> str:
+        """fit == "auto": sheets that were 1 page in the original file stay 1 page."""
         out_pdf.parent.mkdir(parents=True, exist_ok=True)
+        note, counts = "", None
+        if fit == "auto":
+            try:
+                counts = self.page_counts(orig or xlsx)
+            except Exception as e:
+                note = f"page fit not applied: {type(e).__name__}"
         wb = self.app.Workbooks.Open(str(xlsx.resolve()), 0, True)  # no link update, read-only
         try:
+            if counts:
+                try:
+                    self._fit_sheets(wb, counts)
+                except Exception as e:
+                    note = f"page fit not applied: {type(e).__name__}"
             wb.ExportAsFixedFormat(0, str(out_pdf.resolve()), 0, False, False)  # all sheets
         finally:
             wb.Close(False)
+        return note
 
     def close(self):
         try:
@@ -268,11 +318,78 @@ def _libreoffice(xlsx: Path, out_pdf: Path) -> None:
         shutil.move(str(produced), out_pdf)
 
 
-def to_pdf(xlsx: Path, out_pdf: Path, engine: str) -> None:
-    if engine == "excel":
-        get_excel().convert(xlsx, out_pdf)
+_TAIL_TAGS = ("headerFooter", "rowBreaks", "colBreaks", "customProperties", "cellWatches",
+              "ignoredErrors", "smartTags", "drawing", "legacyDrawing", "legacyDrawingHF", "picture",
+              "oleObjects", "controls", "webPublishItems", "tableParts", "extLst")
+
+
+def _fit_sheet_xml(x: str) -> str:
+    """Make one worksheet print on exactly one page (fit to 1 wide x 1 tall)."""
+    m = re.search(r"</sheetData>|<sheetData\b[^>]*/>", x)
+    if not m:
+        return x
+    head = x[:min(m.start(), 20000)]
+    mid, tail = x[len(head):m.end()], x[m.end():]
+
+    sp = re.search(r"<sheetPr\b([^>]*?)(/?)>", head)
+    if sp:
+        if sp.group(2):
+            head = head[:sp.start()] + f'<sheetPr{sp.group(1)}><pageSetUpPr fitToPage="1"/></sheetPr>' + head[sp.end():]
+        else:
+            end = head.find("</sheetPr>", sp.end())
+            if end < 0:
+                return x
+            inner = head[sp.end():end]
+            if "<pageSetUpPr" in inner:
+                inner = re.sub(r"<pageSetUpPr\b[^>]*?/>", '<pageSetUpPr fitToPage="1"/>', inner)
+            else:
+                inner += '<pageSetUpPr fitToPage="1"/>'
+            head = head[:sp.end()] + inner + head[end:]
     else:
-        _libreoffice(xlsx, out_pdf)
+        w = re.search(r"<worksheet\b[^>]*>", head)
+        if not w:
+            return x
+        head = head[:w.end()] + '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>' + head[w.end():]
+
+    ps = re.search(r"<pageSetup\b([^>]*?)/>", tail)
+    if ps:
+        attrs = re.sub(r'\s(?:fitToWidth|fitToHeight|scale)="[^"]*"', "", ps.group(1))
+        tail = tail[:ps.start()] + f'<pageSetup{attrs} fitToWidth="1" fitToHeight="1"/>' + tail[ps.end():]
+    else:
+        pm = re.search(r"<pageMargins\b[^>]*?/>", tail)
+        if pm:
+            pos = pm.end()
+        else:
+            pos = tail.rfind("</worksheet>")
+            if pos < 0:
+                return x
+            for tag in _TAIL_TAGS:
+                t = re.search(rf"<{tag}\b", tail)
+                if t:
+                    pos = min(pos, t.start())
+        tail = tail[:pos] + '<pageSetup fitToWidth="1" fitToHeight="1"/>' + tail[pos:]
+    return head + mid + tail
+
+
+def patch_fit_xml(src: Path, dst: Path) -> int:
+    """Copy an .xlsx and set every worksheet to fit on one page. Returns sheets changed."""
+    n = 0
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            data = zin.read(info.filename)
+            if re.fullmatch(r"xl/worksheets/[^/]+\.xml", info.filename):
+                data = _fit_sheet_xml(data.decode("utf-8")).encode("utf-8")
+                n += 1
+            zout.writestr(info, data)
+    return n
+
+
+def to_pdf(xlsx: Path, out_pdf: Path, engine: str, fit: str = "off", orig=None) -> str:
+    """Returns an optional note for the result line."""
+    if engine == "excel":
+        return get_excel().convert(xlsx, out_pdf, fit, orig)
+    _libreoffice(xlsx, out_pdf)  # "auto" needs Excel's page count; "all" is already in the file
+    return ""
 
 
 def close_engines():
@@ -299,17 +416,27 @@ def convert_one(src: Path, out_pdf: Path, cfg: dict) -> str:
             and out_pdf.stat().st_mtime >= src.stat().st_mtime:
         return f"{src.name}: skipped (PDF already up to date)"
 
-    if not xlsx_fonts.needs_font_change(src, cfg["from_font"]):
-        to_pdf(src, out_pdf, cfg["engine"])
-        note = "font not used, converted directly"
-    else:
-        with tempfile.TemporaryDirectory() as td:
-            tmp = Path(td) / src.name
+    fit = cfg.get("fit", "auto")  # auto | all | off
+    with tempfile.TemporaryDirectory() as td:
+        work, parts = src, []
+        if xlsx_fonts.needs_font_change(src, cfg["from_font"]):
+            tmp = Path(td) / "fonts" / src.name
+            tmp.parent.mkdir()
             st = xlsx_fonts.replace_fonts_xml(src, tmp, cfg["from_font"], cfg["to_font"], cfg["khmer"])
-            t1 = time.time()
-            to_pdf(tmp, out_pdf, cfg["engine"])
-        note = f"{st['cells']} cells changed, fonts {t1 - t0:.1f}s"
-    return f"{src.name} -> {out_pdf.name}  ({note})  {time.time() - t0:.1f}s"
+            work = tmp
+            parts.append(f"{st['cells']} cells changed, fonts {time.time() - t0:.1f}s")
+        else:
+            parts.append("font not used, converted directly")
+        if fit == "all":
+            tmp = Path(td) / "fit" / src.name
+            tmp.parent.mkdir()
+            patch_fit_xml(work, tmp)
+            work = tmp
+            parts.append("each sheet fitted to 1 page")
+        extra = to_pdf(work, out_pdf, cfg["engine"], fit, src)
+        if extra:
+            parts.append(extra)
+    return f"{src.name} -> {out_pdf.name}  ({', '.join(parts)})  {time.time() - t0:.1f}s"
 
 
 def make_jobs(inputs, out_dir=None, skipped=None):

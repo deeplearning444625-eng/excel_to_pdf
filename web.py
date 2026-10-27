@@ -26,6 +26,7 @@ from web_ui import PAGE
 APP_ID = "excel2pdf"
 DEFAULT_PORT = 8765
 SPEEDS = ["Auto (recommended)", "Faster (3 at once)", "Safer (1 at a time)"]
+FIT_CHOICES = ("auto", "all", "off")
 EXCEL_EXT = (".xlsx", ".xlsm")
 BAD_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 MAX_UPLOAD = 2 * 1024 ** 3
@@ -90,6 +91,7 @@ class AppState:
             "khmer": s.get("khmer") or "Auto (detect)",
             "speed": s.get("speed") if s.get("speed") in SPEEDS else SPEEDS[0],
             "skip": bool(s.get("skip", False)),
+            "fit": s.get("fit") if s.get("fit") in FIT_CHOICES else "auto",
         }
         self.khmer_fonts = core.khmer_fonts_installed()
         self.engine = core.resolve_engine("auto")
@@ -211,6 +213,8 @@ class AppState:
                 s["speed"] = d["speed"]
             if "skip" in d:
                 s["skip"] = bool(d["skip"])
+            if d.get("fit") in FIT_CHOICES:
+                s["fit"] = d["fit"]
             snapshot = dict(s)
         core.save_settings(snapshot)
         return {"ok": True}
@@ -265,7 +269,8 @@ class AppState:
         workers = 1 if sp.startswith("Safer") else min(3, len(jobs)) if sp.startswith("Faster") \
             else core.auto_workers(jobs)
         cfg = {"from_font": core.FROM_FONT, "to_font": core.TO_FONT, "engine": self.engine,
-               "khmer": core.pick_khmer_font(st["khmer"]), "skip_existing": st["skip"]}
+               "khmer": core.pick_khmer_font(st["khmer"]), "skip_existing": st["skip"],
+               "fit": st["fit"]}
         runner = core.Runner(jobs, cfg, workers)
         with self.lock:
             self.pre_fail = len(skipped)

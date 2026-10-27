@@ -41,6 +41,9 @@ def run_cli(argv):
     ap.add_argument("--khmer-font", help="font for Khmer letters (auto-detected if omitted)")
     ap.add_argument("-j", "--jobs", type=int, default=0, help="files converted at once (default: automatic)")
     ap.add_argument("--timeout", type=int, default=240, help="seconds before a stuck file is stopped")
+    ap.add_argument("--fit", choices=["auto", "all", "off"], default="auto",
+                    help="page fit: auto = sheets that were 1 page stay 1 page (Excel engine), "
+                         "all = every sheet on 1 page, off = keep the Excel page setup")
     ap.add_argument("--skip-existing", action="store_true", help="skip files whose PDF is already up to date")
     ap.add_argument("--cli", action="store_true", help="command-line mode (no window)")
     ap.add_argument("--version", action="version", version=f"excel2pdf {core.VERSION}")
@@ -60,7 +63,8 @@ def run_cli(argv):
         print(problem)
         return 1
     cfg = {"from_font": a.from_font, "to_font": a.to_font, "engine": engine,
-           "khmer": core.pick_khmer_font(a.khmer_font), "skip_existing": a.skip_existing}
+           "khmer": core.pick_khmer_font(a.khmer_font), "skip_existing": a.skip_existing,
+           "fit": a.fit}
     workers = max(1, min(a.jobs or core.auto_workers(jobs), len(jobs)))
     print(f"excel2pdf {core.VERSION} | engine: {engine} | workers: {workers} | files: {len(jobs)} | "
           f"'{a.from_font}' -> '{a.to_font}' | Khmer font: '{cfg['khmer']}'")

@@ -27,10 +27,20 @@ A crash log is written to `%APPDATA%\excel2pdf\error.log`.
 SmartScreen may warn because the exe is not code-signed: More info -> Run anyway.
 `excel2pdf-fast-start.zip` is the same program as a folder: it opens faster (unzip, run excel2pdf-fast.exe).
 
+## Page fit
+Options -> **Page fit** (command line: `--fit`):
+- **Auto** (default): a sheet that is 1 page in the original Excel file stays 1 page in the PDF
+  (it is shrunk slightly to fit). Sheets with several pages keep their normal page setup.
+  Needs the Microsoft Excel engine (LibreOffice cannot count pages, so Auto keeps the original setup).
+- **Fit every sheet to 1 page**: every sheet is shrunk to one page. Works with Excel and LibreOffice.
+  Very long sheets become small, so use it only when you want that.
+- **Keep the Excel page setup**: no change.
+
 ## Command line
     excel2pdf.exe report.xlsx --cli
     excel2pdf.exe D:\excel_folder -o D:\pdf --jobs 3 --khmer-font "Khmer OS System"
     excel2pdf.exe D:\excel_folder --skip-existing --timeout 300
+    excel2pdf.exe report.xlsx --cli --fit all
 
 ## What makes it fast
 - Fonts are edited inside the .xlsx (no re-save): pictures, shapes and charts are kept

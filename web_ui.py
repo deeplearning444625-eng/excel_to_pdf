@@ -122,6 +122,13 @@ progress{width:100%;height:10px;accent-color:var(--accent)}
           <option>Faster (3 at once)</option>
           <option>Safer (1 at a time)</option>
         </select>
+        <span>Page fit:</span>
+        <select id="fit">
+          <option value="auto">Auto: a 1-page sheet stays 1 page (recommended)</option>
+          <option value="all">Fit every sheet to 1 page</option>
+          <option value="off">Keep the Excel page setup</option>
+        </select>
+        <span id="fitNote" class="note" style="grid-column:1/-1;margin:0"></span>
         <label class="row"><input type="checkbox" id="skip"> Skip files that already have an up-to-date PDF</label>
       </div>
     </fieldset>
@@ -273,6 +280,8 @@ function renderControls(){
   else if(r.finished) text = r.cancelled ? "Cancelled." :
       "Finished: " + r.ok + " done, " + r.fail + " failed, in " + Math.round(r.elapsed) + " s.";
   $("#summary").textContent = text;
+  $("#fitNote").textContent = (S.engine_name === "LibreOffice" && S.settings.fit === "auto")
+    ? "LibreOffice cannot count pages, so Auto keeps the original page setup. Choose Fit every sheet to 1 page to force it." : "";
   $("#engineLine").textContent = "Engine: " + S.engine_name + " \u00b7 PDFs are saved to: " + S.settings.out_dir;
 }
 
@@ -288,6 +297,7 @@ function loadSettingsOnce(){
   k.value = s.khmer;
   $("#speed").value = s.speed;
   $("#skip").checked = s.skip;
+  $("#fit").value = s.fit;
 }
 
 function renderAll(){
@@ -405,12 +415,13 @@ $("#btnClear").onclick = async () => { await api("/api/clear"); openDetails.clea
 async function saveSettings(){
   const mode = document.querySelector("input[name=outmode]:checked");
   const j = await api("/api/settings", {out_mode:mode ? mode.value : "folder", out_dir:$("#outDir").value,
-                                        khmer:$("#khmer").value, speed:$("#speed").value, skip:$("#skip").checked});
+                                        khmer:$("#khmer").value, speed:$("#speed").value, skip:$("#skip").checked,
+                                        fit:$("#fit").value});
   if(j.error) addLocal("error", j.error);
   await refresh();
 }
 document.querySelectorAll("input[name=outmode]").forEach(r => r.onchange = saveSettings);
-for(const id of ["#outDir", "#khmer", "#speed", "#skip"]) $(id).onchange = saveSettings;
+for(const id of ["#outDir", "#khmer", "#speed", "#skip", "#fit"]) $(id).onchange = saveSettings;
 
 $("#btnGo").onclick = async () => {
   await saveSettings();
