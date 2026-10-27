@@ -245,6 +245,7 @@ function renderRows(){
     const st = el("td", "s-" + it.status, it.text);
     if(it.status === "failed" && it.raw && openDetails.has(it.id)) st.appendChild(el("pre", "raw", it.raw));
     const tm = el("td", "time", it.time || "");
+    if(it.info) tm.title = it.info;  // hover the time to see where it went
     const act = el("td", "act");
     if(it.pdf){
       const a = el("a", "btn link", "PDF"); a.href = "/api/download?id=" + encodeURIComponent(it.id); a.download = "";
