@@ -1,4 +1,6 @@
 """Engines, workers, scheduling and settings for excel2pdf (no GUI code here)."""
+import atexit
+import itertools
 import json
 import multiprocessing
 import os
@@ -8,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -17,6 +20,8 @@ import xlsx_fonts
 VERSION = "1.3.0"
 FROM_FONT = "Khmer OS Moul Light"
 TO_FONT = "Times New Roman"
+IDLE_CLOSE_SECONDS = 600   # an idle hidden Excel is closed after this; it restarts when needed
+RECYCLE_EVERY = 150        # fresh Excel after this many files (avoids slow memory growth)
 NOWIN = 0x08000000 if os.name == "nt" else 0  # no console flash from the windowed exe
 
 KHMER_PREFERENCE = [
@@ -510,30 +515,58 @@ def skipped_message(items, title, limit=10) -> str:
     return title + "\n\n" + "\n".join(lines)
 
 
-# ------------------------------------------------------------------ parallel runner
-def worker(wid, q_in, q_out, stop, cfg):
-    init_err = None
+# ------------------------------------------------------------------ warm worker pool
+# Worker processes (each with one hidden Excel) stay alive between runs, so the 2nd, 3rd...
+# batch starts at once instead of waiting for Excel to start again.
+_RUN_IDS = itertools.count(1)
+
+
+def _reset_excel():
+    """Drop a broken or stale Excel so the next file starts a fresh one."""
+    global _excel
+    if _excel is not None:
+        try:
+            _excel.close()
+        except Exception:
+            pass
+        _excel = None
+
+
+def worker(wid, q_in, q_out, stop, engine):
+    last, sent_pid, count = time.time(), None, 0
     try:
-        if cfg["engine"] == "excel":
-            try:
-                q_out.put(("ready", wid, get_excel().pid))
-            except Exception as e:
-                init_err = str(e)
         while True:
             try:
-                src, out = q_in.get(timeout=0.5)
+                rid, src, out, cfg = q_in.get(timeout=0.5)
             except queue.Empty:
                 if stop.is_set():
                     break
+                if time.time() - last > IDLE_CLOSE_SECONDS and (_excel is not None or _lo_profile):
+                    close_engines()  # idle for a while: free the memory, restart on demand
+                    sent_pid = None
                 continue
-            q_out.put(("start", wid, src))
-            if init_err:
-                q_out.put(("done", wid, src, False, init_err))
-                continue
+            if engine == "excel":
+                if count and count % RECYCLE_EVERY == 0:
+                    _reset_excel()
+                try:  # start (or reuse) Excel now and tell the parent its pid so a hang can be stopped
+                    pid = get_excel().pid
+                    if pid != sent_pid:
+                        sent_pid = pid
+                        q_out.put(("ready", wid, pid))
+                except Exception:
+                    pass  # shows up as a normal error for this file
+            q_out.put(("start", wid, rid, src))
             try:
-                q_out.put(("done", wid, src, True, convert_one(Path(src), Path(out), cfg)))
+                q_out.put(("done", wid, rid, src, True, convert_one(Path(src), Path(out), cfg)))
             except BaseException as e:
-                q_out.put(("done", wid, src, False, f"{type(e).__name__}: {e}"))
+                text = f"{type(e).__name__}: {e}"
+                low = text.lower()
+                if any(k in low for k in ("rpc server", "disconnected", "call was rejected", "invalid class string")):
+                    _reset_excel()
+                    sent_pid = None
+                q_out.put(("done", wid, rid, src, False, text))
+            count += 1
+            last = time.time()
     finally:
         close_engines()
 
@@ -551,8 +584,100 @@ def _kill_pid(pid):
         pass
 
 
+class _Pool:
+    def __init__(self, engine):
+        self.engine = engine
+        self.ctx = multiprocessing.get_context("spawn")
+        self.q_in, self.q_out, self.stop = self.ctx.Queue(), self.ctx.Queue(), self.ctx.Event()
+        self.procs, self.pids, self._wid = {}, {}, 0
+
+    def spawn(self):
+        self._wid += 1
+        p = self.ctx.Process(target=worker, args=(self._wid, self.q_in, self.q_out, self.stop, self.engine),
+                             daemon=True)
+        p.start()
+        self.procs[self._wid] = p
+
+    def ensure(self, n):
+        for wid, p in list(self.procs.items()):
+            if not p.is_alive():
+                self.procs.pop(wid, None)
+                _kill_pid(self.pids.pop(wid, None))
+        while len(self.procs) < n:
+            self.spawn()
+
+    def kill(self, wid):
+        p = self.procs.pop(wid, None)
+        if p is not None:
+            p.terminate()
+        _kill_pid(self.pids.pop(wid, None))
+
+    def kill_all(self):
+        self.stop.set()
+        for wid in list(self.procs):
+            self.kill(wid)
+
+    def close(self):
+        """Polite shutdown: workers quit their Excel, then anything left is stopped."""
+        self.stop.set()
+        for p in list(self.procs.values()):
+            p.join(timeout=20)
+        for wid, p in list(self.procs.items()):
+            if p.is_alive():
+                self.kill(wid)
+        self.procs.clear()
+
+
+_pool = None
+_pool_lock = threading.Lock()
+
+
+def get_pool(engine) -> _Pool:
+    global _pool
+    with _pool_lock:
+        if _pool is not None and (_pool.engine != engine or _pool.stop.is_set()):
+            _pool.kill_all()
+            _pool = None
+        if _pool is None:
+            _pool = _Pool(engine)
+            atexit.register(shutdown_pool)
+        return _pool
+
+
+def warm_pool(engine="excel", n=1):
+    """Start Excel in the background (non-blocking) so the first Convert starts at once."""
+    if engine != "excel":
+        return
+    try:
+        get_pool(engine).ensure(n)
+    except Exception:
+        pass
+
+
+def shutdown_pool():
+    """Close every worker and its Excel. Call when the app exits."""
+    global _pool
+    with _pool_lock:
+        p, _pool = _pool, None
+    if p is not None:
+        try:
+            p.close()
+        except Exception:
+            pass
+
+
+def _drop_pool(kill=True):
+    global _pool
+    with _pool_lock:
+        p, _pool = _pool, None
+    if p is not None:
+        p.kill_all() if kill else p.close()
+
+
 class Runner:
-    """Non-blocking batch converter. Call start(), then poll() until .finished."""
+    """Non-blocking batch converter. Call start(), then poll() until .finished.
+
+    Uses the warm worker pool; `workers` is how many files may run at the same time."""
 
     def __init__(self, jobs, cfg, workers, timeout=240):
         self.jobs, self.cfg, self.timeout = jobs, cfg, timeout
@@ -561,30 +686,30 @@ class Runner:
         self.done = self.ok = self.fail = 0
         self.finished = self.cancelled = False
         self.t0 = time.time()
+        self.rid = next(_RUN_IDS)
         self._out = {str(s): str(o) for s, o in jobs}
-        self._tries, self._current, self._pids, self._procs = {}, {}, {}, {}
-        self._wid = self._respawns = 0
-        self.ctx = multiprocessing.get_context("spawn")
-        self.q_in, self.q_out, self.stop = self.ctx.Queue(), self.ctx.Queue(), self.ctx.Event()
+        self._pending = [(str(s), str(o)) for s, o in jobs]  # biggest first, not yet handed out
+        self._tries, self._current, self._outstanding = {}, {}, {}
+        self._respawns = 0
+        self._last_msg = time.time()
+        self.pool = get_pool(cfg["engine"])
 
     def start(self):
-        for s, o in self.jobs:
-            self.q_in.put((str(s), str(o)))
-        for _ in range(self.workers):
-            self._spawn()
+        self.pool.ensure(self.workers)
+        self._feed()
 
-    def _spawn(self):
-        self._wid += 1
-        p = self.ctx.Process(target=worker, args=(self._wid, self.q_in, self.q_out, self.stop, self.cfg),
-                             daemon=True)
-        p.start()
-        self._procs[self._wid] = p
+    def _feed(self):
+        while self._pending and len(self._outstanding) < self.workers:
+            src, out = self._pending.pop(0)
+            self._outstanding[src] = time.time()
+            self.pool.q_in.put((self.rid, src, out, self.cfg))
 
     def _account(self, src, ok, msg, retryable, events):
+        self._outstanding.pop(src, None)
         n = self._tries.get(src, 0) + 1
         self._tries[src] = n
         if not ok and retryable and n <= 1:
-            self.q_in.put((src, self._out[src]))
+            self._pending.insert(0, (src, self._out[src]))
             events.append(("retry", src))
             return
         self.done += 1
@@ -593,63 +718,65 @@ class Runner:
         events.append(("done", src, ok, msg if ok else friendly_error(msg), "" if ok else msg))
 
     def poll(self):
-        ev = []
+        ev, pool = [], self.pool
         if self.finished:
             return ev
         while True:
             try:
-                m = self.q_out.get_nowait()
+                m = pool.q_out.get_nowait()
             except queue.Empty:
                 break
             if m[0] == "ready":
-                self._pids[m[1]] = m[2]
-            elif m[0] == "start":
-                self._current[m[1]] = (m[2], time.time())
-                ev.append(("start", m[2]))
+                pool.pids[m[1]] = m[2]
+                continue
+            if m[2] != self.rid:  # leftover from an earlier run
+                continue
+            self._last_msg = time.time()
+            if m[0] == "start":
+                self._current[m[1]] = (m[3], time.time())
+                ev.append(("start", m[3]))
             elif m[0] == "done":
                 self._current.pop(m[1], None)
-                self._account(m[2], m[3], m[4], (not m[3]) and _transient(m[4]), ev)
+                if m[3] in self._outstanding:
+                    self._account(m[3], m[4], m[5], (not m[4]) and _transient(m[5]), ev)
         now = time.time()
-        for wid, p in list(self._procs.items()):
+        for wid, p in list(pool.procs.items()):
             cur = self._current.get(wid)
             hung = bool(cur) and now - cur[1] > self.timeout
             if hung or not p.is_alive():
                 if hung:
-                    p.terminate()
-                    _kill_pid(self._pids.get(wid))
-                self._procs.pop(wid)
+                    pool.kill(wid)
+                else:
+                    pool.procs.pop(wid, None)
+                    _kill_pid(pool.pids.pop(wid, None))
                 self._current.pop(wid, None)
-                if cur:
+                if cur and cur[0] in self._outstanding:
                     self._account(cur[0], False, "timed out" if hung else "worker stopped (crashed)",
                                   True, ev)
                 if self.done < self.total and self._respawns < 12:
                     self._respawns += 1
-                    self._spawn()
-        if self.done >= self.total or (not self._procs and self.done < self.total):
+                    pool.spawn()
+        busy = {c[0] for c in self._current.values()}  # a file taken by a worker that died unseen
+        if self._outstanding and now - self._last_msg > 60:
+            for src in [s for s in self._outstanding if s not in busy]:
+                self._account(src, False, "worker stopped (crashed)", True, ev)
+            self._last_msg = now
+        if self.done < self.total:
+            self._feed()
+        if self.done >= self.total or (not pool.procs and self.done < self.total):
             if self.done < self.total:  # workers keep dying
                 lost = self.total - self.done
                 self.fail += lost
                 self.done = self.total
                 ev.append(("abort", f"{lost} file(s) not converted: the converter keeps stopping."))
-            self.stop.set()
-            self._shutdown()
+                _drop_pool()
+            self.finished = True  # the pool (and its Excel) stays open for the next run
         return ev
-
-    def _shutdown(self):
-        for p in self._procs.values():
-            p.join(timeout=20)
-            if p.is_alive():
-                p.terminate()
-        self.finished = True
 
     def cancel(self):
         self.cancelled = True
-        self.stop.set()
-        for wid, p in list(self._procs.items()):
-            p.terminate()
-            _kill_pid(self._pids.get(wid))
-        self._procs.clear()
         self.finished = True
+        _drop_pool()  # stops the running files; the next run starts a fresh Excel
 
     @property
     def elapsed(self):
@@ -671,18 +798,21 @@ def run_blocking(jobs, cfg, workers, timeout=240, printer=print):
             close_engines()
     else:
         r = Runner(jobs, cfg, workers, timeout)
-        r.start()
-        n = 0
-        while not r.finished:
-            for e in r.poll():
-                if e[0] == "done":
-                    n += 1
-                    name = Path(e[1]).name
-                    printer(f"[{n}/{total}] {'OK  ' if e[2] else 'FAIL'} "
-                            f"{e[3] if e[2] else name + ': ' + e[3] + '  (' + e[4] + ')'}")
-                elif e[0] == "abort":
-                    printer(e[1])
-            time.sleep(0.15)
-        ok, fail = r.ok, r.fail
+        try:
+            r.start()
+            n = 0
+            while not r.finished:
+                for e in r.poll():
+                    if e[0] == "done":
+                        n += 1
+                        name = Path(e[1]).name
+                        printer(f"[{n}/{total}] {'OK  ' if e[2] else 'FAIL'} "
+                                f"{e[3] if e[2] else name + ': ' + e[3] + '  (' + e[4] + ')'}")
+                    elif e[0] == "abort":
+                        printer(e[1])
+                time.sleep(0.15)
+            ok, fail = r.ok, r.fail
+        finally:
+            shutdown_pool()  # one-off command line run: quit Excel when finished
     printer(f"Done: {ok} OK, {fail} failed, {time.time() - t0:.1f}s total")
     return fail
