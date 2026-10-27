@@ -25,6 +25,8 @@ CELL_RE = re.compile(r"<c\b([^>]*?)(?:/>|>(.*?)</c>)", re.S)
 RUN_RE = re.compile(r"<r>\s*(<rPr>.*?</rPr>)?\s*<t\b[^>]*>(.*?)</t>\s*</r>", re.S)
 T_RE = re.compile(r"<t\b[^>]*>(.*?)</t>", re.S)
 RFONT_RE = re.compile(r'<rFont\s+val="([^"]*)"')
+S_ATTR = re.compile(r'\ss="(\d+)"')
+T_ATTR = re.compile(r'\st="(\w+)"')
 
 
 def _esc_attr(s: str) -> str:
@@ -142,13 +144,13 @@ def _process_styles(styles: str, from_l: str, to_font: str):
 
 # ------------------------------------------------------------ main entry
 def needs_font_change(src, from_font: str) -> bool:
-    key = from_font.lower().encode()
+    key = re.compile(re.escape(from_font.encode("utf-8")), re.I)  # scans bytes, no lower() copy
     try:
         with zipfile.ZipFile(src) as z:
             for name in z.namelist():
                 if name in ("xl/styles.xml", "xl/sharedStrings.xml") or \
                         name.startswith(("xl/drawings/", "xl/comments", "xl/charts/")):
-                    if key in z.read(name).lower():
+                    if key.search(z.read(name)):
                         return True
     except zipfile.BadZipFile:
         raise
@@ -208,9 +210,13 @@ def replace_fonts_xml(src, dst, from_font, to_font, khmer_font) -> dict:
                 attrs, body = m.group(1), m.group(2)
                 if body is None:
                     return m.group(0)
-                sm = re.search(r'\ss="(\d+)"', " " + attrs)
+                if "inlineStr" not in attrs:  # fast path: most cells are not in a target style
+                    sm0 = S_ATTR.search(" " + attrs)
+                    if not sm0 or int(sm0.group(1)) not in xf_target:
+                        return m.group(0)
+                sm = S_ATTR.search(" " + attrs)
                 fid = xf_target.get(int(sm.group(1))) if sm else None
-                tm = re.search(r'\st="(\w+)"', " " + attrs)
+                tm = T_ATTR.search(" " + attrs)
                 t = tm.group(1) if tm else ""
                 if fid is not None:
                     stats["cells"] += 1
@@ -256,13 +262,13 @@ def replace_fonts_xml(src, dst, from_font, to_font, khmer_font) -> dict:
                 if from_l in raw.lower():
                     changed[name] = fpat.sub(_esc_attr(to_font), raw).encode("utf-8")
 
-        with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as zout:
+        with zipfile.ZipFile(dst, "w", zipfile.ZIP_STORED) as zout:  # temp file: no compression
             for info in zin.infolist():
                 data = changed.get(info.filename)
                 if data is None:
                     data = zin.read(info.filename)
                 zi = zipfile.ZipInfo(info.filename, info.date_time)
-                zi.compress_type = zipfile.ZIP_DEFLATED
+                zi.compress_type = zipfile.ZIP_STORED
                 zi.external_attr = info.external_attr
-                zout.writestr(zi, data, compresslevel=1)
+                zout.writestr(zi, data)
     return stats
