@@ -287,7 +287,11 @@ class ExcelEngine:
                     self._fit_sheets(wb, counts)
                 except Exception as e:
                     note = f"page fit not applied: {type(e).__name__}"
-            wb.ExportAsFixedFormat(0, str(out_pdf.resolve()), 0, False, False)  # all sheets
+            import pythoncom
+            miss = pythoncom.Missing
+            # args: type=PDF, file, quality=standard, doc props, ignore print areas, from, to,
+            # OpenAfterPublish=False -> the finished PDF is never opened in a viewer
+            wb.ExportAsFixedFormat(0, str(out_pdf.resolve()), 0, False, False, miss, miss, False)  # all sheets
         finally:
             wb.Close(False)
         return note
