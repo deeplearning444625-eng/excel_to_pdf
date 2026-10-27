@@ -207,7 +207,9 @@ class ExcelEngine:
         self.app = win32com.client.DispatchEx("Excel.Application")
         self.pid = None
         for attr, val in (("Visible", False), ("DisplayAlerts", False), ("ScreenUpdating", False),
-                          ("EnableEvents", False), ("AskToUpdateLinks", False), ("Interactive", False)):
+                          ("EnableEvents", False), ("AskToUpdateLinks", False), ("Interactive", False),
+                          ("AutomationSecurity", 3),  # 3 = no macros / no security prompts when opening
+                          ("EnableAnimations", False), ("DisplayStatusBar", False)):
             try:
                 setattr(self.app, attr, val)
             except Exception:
@@ -223,17 +225,21 @@ class ExcelEngine:
         except Exception:
             pass
 
-    def page_counts(self, path: Path) -> list:
+    @staticmethod
+    def _count_pages(wb) -> list:
         """Printed pages per worksheet (None when Excel cannot tell, e.g. no printer)."""
+        out = []
+        for i in range(1, wb.Worksheets.Count + 1):
+            try:
+                out.append(int(wb.Worksheets(i).PageSetup.Pages.Count))
+            except Exception:
+                out.append(None)
+        return out
+
+    def page_counts(self, path: Path) -> list:
         wb = self.app.Workbooks.Open(str(Path(path).resolve()), 0, True)
         try:
-            out = []
-            for i in range(1, wb.Worksheets.Count + 1):
-                try:
-                    out.append(int(wb.Worksheets(i).PageSetup.Pages.Count))
-                except Exception:
-                    out.append(None)
-            return out
+            return self._count_pages(wb)
         finally:
             wb.Close(False)
 
@@ -263,13 +269,19 @@ class ExcelEngine:
         """fit == "auto": sheets that were 1 page in the original file stay 1 page."""
         out_pdf.parent.mkdir(parents=True, exist_ok=True)
         note, counts = "", None
-        if fit == "auto":
+        same = orig is None or Path(orig).resolve() == Path(xlsx).resolve()
+        if fit == "auto" and not same:  # fonts were changed: page counts must come from the original
             try:
-                counts = self.page_counts(orig or xlsx)
+                counts = self.page_counts(orig)
             except Exception as e:
                 note = f"page fit not applied: {type(e).__name__}"
         wb = self.app.Workbooks.Open(str(xlsx.resolve()), 0, True)  # no link update, read-only
         try:
+            if fit == "auto" and same:  # same file: count pages in this open, no second Open
+                try:
+                    counts = self._count_pages(wb)
+                except Exception as e:
+                    note = f"page fit not applied: {type(e).__name__}"
             if counts:
                 try:
                     self._fit_sheets(wb, counts)
@@ -374,13 +386,16 @@ def _fit_sheet_xml(x: str) -> str:
 def patch_fit_xml(src: Path, dst: Path) -> int:
     """Copy an .xlsx and set every worksheet to fit on one page. Returns sheets changed."""
     n = 0
-    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
-        for info in zin.infolist():
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_STORED) as zout:
+        for info in zin.infolist():  # temp file: stored (no compression) is much faster
             data = zin.read(info.filename)
             if re.fullmatch(r"xl/worksheets/[^/]+\.xml", info.filename):
                 data = _fit_sheet_xml(data.decode("utf-8")).encode("utf-8")
                 n += 1
-            zout.writestr(info, data)
+            zi = zipfile.ZipInfo(info.filename, info.date_time)
+            zi.compress_type = zipfile.ZIP_STORED
+            zi.external_attr = info.external_attr
+            zout.writestr(zi, data)
     return n
 
 
