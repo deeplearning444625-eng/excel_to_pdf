@@ -253,7 +253,7 @@ class AppState:
 
         with self.lock:
             for it in self.items.values():
-                it.update(status="waiting", text="Waiting", raw="", msg="", out="", t0=0.0, elapsed="")
+                it.update(status="waiting", text="Waiting", raw="", msg="", out="", t0=0.0, elapsed="", info="")
             self.by_src = {str(Path(i["src"])): i for i in self.items.values()}
             self.out_map = {str(s): str(o) for s, o in jobs}
             gone = []
@@ -326,7 +326,7 @@ class AppState:
                     if "skipped" in msg:
                         it.update(status="skipped", text="Skipped (already up to date)")
                     else:
-                        it.update(status="done", text="Done")
+                        it.update(status="done", text="Done", info=msg)
                 else:
                     it.update(status="failed", text="Failed - " + msg, raw=raw, msg=msg)
         self.run.update(done=runner.done, ok=runner.ok, fail=runner.fail + self.pre_fail,
@@ -370,7 +370,7 @@ class AppState:
                 if i["status"] == "running" and i["t0"]:
                     t = f"{now - i['t0']:.0f}s"
                 items.append({"id": i["id"], "name": i["name"], "kind": i["kind"],
-                              "status": i["status"], "text": i["text"], "raw": i["raw"], "time": t,
+                              "status": i["status"], "text": i["text"], "raw": i["raw"], "time": t, "info": i.get("info", ""),
                               "pdf": bool(i["out"]) and i["status"] in ("done", "skipped")})
             return {"version": core.VERSION, "items": items, "run": dict(self.run),
                     "settings": dict(self.settings), "khmer_fonts": self.khmer_fonts,
