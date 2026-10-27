@@ -25,6 +25,7 @@ jobs:
       - name: Build single exe (local app, opens in the browser)
         run: >
           pyinstaller --onefile --windowed --name excel2pdf
+          --paths . --hidden-import core --hidden-import xlsx_fonts --hidden-import web --hidden-import web_ui
           --hidden-import win32com.client --hidden-import pythoncom
           --hidden-import pywintypes --hidden-import win32process
           --exclude-module numpy --exclude-module pandas --exclude-module matplotlib
@@ -33,6 +34,7 @@ jobs:
       - name: Build fast-start folder version
         run: >
           pyinstaller --onedir --windowed --name excel2pdf-fast
+          --paths . --hidden-import core --hidden-import xlsx_fonts --hidden-import web --hidden-import web_ui
           --hidden-import win32com.client --hidden-import pythoncom
           --hidden-import pywintypes --hidden-import win32process
           --exclude-module numpy --exclude-module pandas --exclude-module matplotlib
