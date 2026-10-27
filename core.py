@@ -204,6 +204,41 @@ def _transient(raw: str) -> bool:
 
 
 # ------------------------------------------------------------------ engines
+class _WindowHider(threading.Thread):
+    """Windows only: while a file converts, hide every window that belongs to the hidden Excel
+    (the "Publishing"/progress box, or a window that flashes up). Uses ctypes, no extra package."""
+
+    def __init__(self, pid):
+        super().__init__(daemon=True)
+        self.pid = pid
+        self.done = threading.Event()
+
+    def run(self):
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+            pid = self.pid
+
+            def cb(hwnd, _lparam):
+                try:
+                    if user32.IsWindowVisible(hwnd):
+                        owner = wintypes.DWORD()
+                        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+                        if owner.value == pid:
+                            user32.ShowWindow(hwnd, 0)  # SW_HIDE
+                except Exception:
+                    pass
+                return True
+
+            proc = enum_proc(cb)
+            while not self.done.wait(0.03):
+                user32.EnumWindows(proc, 0)
+        except Exception:
+            pass  # hiding is a bonus; never break a conversion because of it
+
+
 class ExcelEngine:
     """One hidden Excel instance per worker, reused for all its files."""
 
@@ -271,16 +306,29 @@ class ExcelEngine:
         return done
 
     def convert(self, xlsx: Path, out_pdf: Path, fit: str = "off", orig=None) -> str:
+        hider = _WindowHider(self.pid) if (os.name == "nt" and self.pid) else None
+        if hider:
+            hider.start()
+        try:
+            return self._convert(xlsx, out_pdf, fit, orig)
+        finally:
+            if hider:
+                hider.done.set()
+
+    def _convert(self, xlsx: Path, out_pdf: Path, fit: str = "off", orig=None) -> str:
         """fit == "auto": sheets that were 1 page in the original file stay 1 page."""
         out_pdf.parent.mkdir(parents=True, exist_ok=True)
         note, counts = "", None
+        t_start = time.time()
         same = orig is None or Path(orig).resolve() == Path(xlsx).resolve()
         if fit == "auto" and not same:  # fonts were changed: page counts must come from the original
             try:
                 counts = self.page_counts(orig)
             except Exception as e:
                 note = f"page fit not applied: {type(e).__name__}"
+        t_count = time.time()
         wb = self.app.Workbooks.Open(str(xlsx.resolve()), 0, True)  # no link update, read-only
+        t_open = time.time()
         try:
             if fit == "auto" and same:  # same file: count pages in this open, no second Open
                 try:
@@ -296,10 +344,15 @@ class ExcelEngine:
             miss = pythoncom.Missing
             # args: type=PDF, file, quality=standard, doc props, ignore print areas, from, to,
             # OpenAfterPublish=False -> the finished PDF is never opened in a viewer
+            t_fit = time.time()
             wb.ExportAsFixedFormat(0, str(out_pdf.resolve()), 0, False, False, miss, miss, False)  # all sheets
+            t_end = time.time()
         finally:
             wb.Close(False)
-        return note
+        # where the time went (shown in the result line / Details), to find the slow step
+        timing = (f"Excel: pre-count {t_count - t_start:.1f}s, open {t_open - t_count:.1f}s, "
+                  f"page fit {t_fit - t_open:.1f}s, export {t_end - t_fit:.1f}s")
+        return f"{note}; {timing}" if note else timing
 
     def close(self):
         try:
