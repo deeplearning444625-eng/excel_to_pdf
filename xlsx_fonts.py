@@ -25,6 +25,9 @@ CELL_RE = re.compile(r"<c\b([^>]*?)(?:/>|>(.*?)</c>)", re.S)
 RUN_RE = re.compile(r"<r>\s*(<rPr>.*?</rPr>)?\s*<t\b[^>]*>(.*?)</t>\s*</r>", re.S)
 T_RE = re.compile(r"<t\b[^>]*>(.*?)</t>", re.S)
 RFONT_RE = re.compile(r'<rFont\s+val="([^"]*)"')
+KHMER_ROW_FACTOR = 1.9   # Khmer fonts are tall: row height = font size x this, so tops are not cut
+ROW_RE = re.compile(r"<row\b([^>]*?)(/?)>")
+ROWNUM_RE = re.compile(r'\sr="[A-Z]+(\d+)"')
 S_ATTR = re.compile(r'\ss="(\d+)"')
 T_ATTR = re.compile(r'\st="(\w+)"')
 
@@ -142,6 +145,21 @@ def _process_styles(styles: str, from_l: str, to_font: str):
     return new_styles, target, xf_target
 
 
+def _bump_rows(text: str, need: dict) -> str:
+    """Give rows that hold Khmer text enough height (adds space above the letters)."""
+    def cb(m):
+        attrs = m.group(1)
+        rm = re.search(r'\sr="(\d+)"', attrs)
+        want = need.get(int(rm.group(1))) if rm else None
+        hm = re.search(r'\sht="([\d.]+)"', attrs)
+        if not want or not hm or float(hm.group(1)) >= want:
+            return m.group(0)  # no stored height = Excel sizes the row itself
+        attrs = attrs[:hm.start()] + f' ht="{want:.2f}"' + attrs[hm.end():]
+        attrs = re.sub(r'\scustomHeight="\d"', "", attrs) + ' customHeight="1"'
+        return f"<row{attrs}{m.group(2)}>"
+    return ROW_RE.sub(cb, text)
+
+
 # ------------------------------------------------------------ main entry
 def needs_font_change(src, from_font: str) -> bool:
     key = re.compile(re.escape(from_font.encode("utf-8")), re.I)  # scans bytes, no lower() copy
@@ -205,6 +223,14 @@ def replace_fonts_xml(src, dst, from_font, to_font, khmer_font) -> dict:
             if not ((pat and pat.search(text)) or name_pat.search(text)):
                 continue
             stats["sheets"] += 1
+            rows_need = {}
+
+            def note_khmer(attrs, fid):
+                rm = ROWNUM_RE.search(" " + attrs)
+                if rm:
+                    sz = re.search(r'<sz\s+val="([\d.]+)"', target[fid]) if fid is not None else None
+                    h = min(409.0, float(sz.group(1) if sz else 11) * KHMER_ROW_FACTOR)
+                    rows_need[int(rm.group(1))] = max(rows_need.get(int(rm.group(1)), 0), h)
 
             def cell_cb(m):
                 attrs, body = m.group(1), m.group(2)
@@ -225,6 +251,8 @@ def replace_fonts_xml(src, dst, from_font, to_font, khmer_font) -> dict:
                     if vm:
                         ni = new_string(int(vm.group(1)), fid)
                         if ni is not None:
+                            if HAS_KHMER.search(html.unescape(si_inner[int(vm.group(1))])):
+                                note_khmer(attrs, fid)
                             nb = body[:vm.start(1)] + str(ni) + body[vm.end(1):]
                             return m.group(0).replace(body, nb, 1)
                 elif t == "inlineStr":
@@ -233,12 +261,17 @@ def replace_fonts_xml(src, dst, from_font, to_font, khmer_font) -> dict:
                         inner = build_si(im.group(1), target[fid] if fid is not None else None,
                                          from_l, to_font, khmer_font)
                         if inner is not None:
+                            if HAS_KHMER.search(html.unescape(im.group(1))):
+                                note_khmer(attrs, fid)
                             stats["runs"] += 1
                             nb = body[:im.start(1)] + inner + body[im.end(1):]
                             return m.group(0).replace(body, nb, 1)
                 return m.group(0)
 
             new_text = CELL_RE.sub(cell_cb, text)
+            if rows_need:
+                new_text = _bump_rows(new_text, rows_need)
+                stats["rows"] = stats.get("rows", 0) + len(rows_need)
             if new_text != text:
                 changed[name] = new_text.encode("utf-8")
 
