@@ -117,6 +117,8 @@ class AppState:
             self.items[iid] = {"id": iid, "name": name, "src": str(src), "kind": kind,
                                "status": "waiting", "text": "Waiting", "raw": "", "msg": "",
                                "out": "", "t0": 0.0, "elapsed": ""}
+        if self.engine == "excel" and not self.engine_problem:
+            core.warm_pool("excel")  # start Excel in the background while the user adds files
         return iid
 
     def add_upload(self, name, mtime_ms, rfile, length):
@@ -428,6 +430,7 @@ class AppState:
                 runner, self.runner = self.runner, None
             if runner:
                 runner.cancel()
+        core.shutdown_pool()  # quit the warm Excel instances
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
