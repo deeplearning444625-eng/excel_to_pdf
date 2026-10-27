@@ -271,7 +271,15 @@ class ExcelEngine:
         out = []
         for i in range(1, wb.Worksheets.Count + 1):
             try:
-                out.append(int(wb.Worksheets(i).PageSetup.Pages.Count))
+                ws = wb.Worksheets(i)
+                if ws.Visible != -1:  # hidden sheets are never exported: no need to count them
+                    out.append(None)
+                    continue
+                try:
+                    ws.DisplayPageBreaks = False  # Excel skips drawing page breaks: faster layout
+                except Exception:
+                    pass
+                out.append(int(ws.PageSetup.Pages.Count))
             except Exception:
                 out.append(None)
         return out
@@ -293,7 +301,12 @@ class ExcelEngine:
             for i in range(1, wb.Worksheets.Count + 1):
                 if i > len(counts) or counts[i - 1] != 1:
                     continue
-                ps = wb.Worksheets(i).PageSetup
+                ws = wb.Worksheets(i)
+                try:
+                    ws.DisplayPageBreaks = False
+                except Exception:
+                    pass
+                ps = ws.PageSetup
                 ps.Zoom = False
                 ps.FitToPagesWide = 1
                 ps.FitToPagesTall = 1
