@@ -163,15 +163,14 @@ def _bump_rows(text: str, need: dict) -> str:
 # ------------------------------------------------------------ main entry
 def needs_font_change(src, from_font: str) -> bool:
     key = re.compile(re.escape(from_font.encode("utf-8")), re.I)  # scans bytes, no lower() copy
-    try:
-        with zipfile.ZipFile(src) as z:
-            for name in z.namelist():
-                if name in ("xl/styles.xml", "xl/sharedStrings.xml") or \
-                        name.startswith(("xl/drawings/", "xl/comments", "xl/charts/")):
-                    if key.search(z.read(name)):
-                        return True
-    except zipfile.BadZipFile:
-        raise
+    with zipfile.ZipFile(src) as z:
+        todo = [n for n in z.namelist()
+                if n in ("xl/styles.xml", "xl/sharedStrings.xml")
+                or n.startswith(("xl/drawings/", "xl/comments", "xl/charts/"))]
+        todo.sort(key=lambda n: n != "xl/styles.xml")  # small file first: usually answers at once
+        for name in todo:
+            if key.search(z.read(name)):
+                return True
     return False
 
 
@@ -216,6 +215,25 @@ def replace_fonts_xml(src, dst, from_font, to_font, khmer_font) -> dict:
         # sheets: only touched when they use a target style or name the font in inline text
         pat = re.compile(r'\ss="(?:%s)"' % "|".join(str(i) for i in xf_target)) if xf_target else None
         name_pat = re.compile(re.escape(from_font), re.I)
+        # Only cells that can change are handed to Python: string cells (t="s") in a target
+        # style, and inline strings. Numbers, empty cells and other styles are skipped by the
+        # regex engine itself, which is far faster than a Python callback per cell.
+        if xf_target:
+            ids = "|".join(str(i) for i in xf_target)
+            want = r'(?:(?=[^>]*?\ss="(?:%s)")(?=[^>]*?\st="s")|(?=[^>]*?inlineStr))' % ids
+            count_re = re.compile(r'<c\b(?=[^>]*?\ss="(?:%s)")[^>]*?(?<!/)>' % ids)
+        else:
+            want = r"(?=[^>]*?inlineStr)"
+            count_re = None
+        cell_re = re.compile(r"<c\b" + want + r"([^>]*?)(?<!/)>(.*?)</c>", re.S)
+        kh_cache, h_cache = {}, {}
+
+        def si_has_khmer(idx):
+            v = kh_cache.get(idx)
+            if v is None:
+                v = kh_cache[idx] = bool(HAS_KHMER.search(html.unescape(si_inner[idx])))
+            return v
+
         for name in names:
             if not (name.startswith("xl/worksheets/") and name.endswith(".xml")):
                 continue
@@ -224,37 +242,36 @@ def replace_fonts_xml(src, dst, from_font, to_font, khmer_font) -> dict:
                 continue
             stats["sheets"] += 1
             rows_need = {}
+            if count_re is not None:  # same number as before: target-style cells that have content
+                stats["cells"] += len(count_re.findall(text))
 
             def note_khmer(attrs, fid):
                 rm = ROWNUM_RE.search(" " + attrs)
                 if rm:
-                    sz = re.search(r'<sz\s+val="([\d.]+)"', target[fid]) if fid is not None else None
-                    h = min(409.0, float(sz.group(1) if sz else 11) * KHMER_ROW_FACTOR)
-                    rows_need[int(rm.group(1))] = max(rows_need.get(int(rm.group(1)), 0), h)
+                    h = h_cache.get(fid)
+                    if h is None:
+                        sz = re.search(r'<sz\s+val="([\d.]+)"', target[fid]) if fid is not None else None
+                        h = h_cache[fid] = min(409.0, float(sz.group(1) if sz else 11) * KHMER_ROW_FACTOR)
+                    r = int(rm.group(1))
+                    if rows_need.get(r, 0) < h:
+                        rows_need[r] = h
 
             def cell_cb(m):
                 attrs, body = m.group(1), m.group(2)
-                if body is None:
-                    return m.group(0)
-                if "inlineStr" not in attrs:  # fast path: most cells are not in a target style
-                    sm0 = S_ATTR.search(" " + attrs)
-                    if not sm0 or int(sm0.group(1)) not in xf_target:
-                        return m.group(0)
-                sm = S_ATTR.search(" " + attrs)
+                a = " " + attrs
+                sm = S_ATTR.search(a)
                 fid = xf_target.get(int(sm.group(1))) if sm else None
-                tm = T_ATTR.search(" " + attrs)
+                tm = T_ATTR.search(a)
                 t = tm.group(1) if tm else ""
-                if fid is not None:
-                    stats["cells"] += 1
                 if t == "s" and fid is not None:
                     vm = re.search(r"<v>(\d+)</v>", body)
                     if vm:
                         ni = new_string(int(vm.group(1)), fid)
                         if ni is not None:
-                            if HAS_KHMER.search(html.unescape(si_inner[int(vm.group(1))])):
+                            if si_has_khmer(int(vm.group(1))):
                                 note_khmer(attrs, fid)
                             nb = body[:vm.start(1)] + str(ni) + body[vm.end(1):]
-                            return m.group(0).replace(body, nb, 1)
+                            return f"<c{attrs}>{nb}</c>"
                 elif t == "inlineStr":
                     im = re.search(r"<is>(.*?)</is>", body, re.S)
                     if im:
@@ -265,10 +282,10 @@ def replace_fonts_xml(src, dst, from_font, to_font, khmer_font) -> dict:
                                 note_khmer(attrs, fid)
                             stats["runs"] += 1
                             nb = body[:im.start(1)] + inner + body[im.end(1):]
-                            return m.group(0).replace(body, nb, 1)
+                            return f"<c{attrs}>{nb}</c>"
                 return m.group(0)
 
-            new_text = CELL_RE.sub(cell_cb, text)
+            new_text = cell_re.sub(cell_cb, text)
             if rows_need:
                 new_text = _bump_rows(new_text, rows_need)
                 stats["rows"] = stats.get("rows", 0) + len(rows_need)
@@ -277,7 +294,8 @@ def replace_fonts_xml(src, dst, from_font, to_font, khmer_font) -> dict:
 
         # rich strings that name the font explicitly -> fix in place
         out_si = list(si_orig)
-        for i, inner in enumerate(si_inner):
+        name_in_sst = bool(sst) and from_l in sst.lower()
+        for i, inner in enumerate(si_inner if name_in_sst else ()):
             if from_l in inner.lower():
                 r = build_si(inner, None, from_l, to_font, khmer_font)
                 if r is not None:
